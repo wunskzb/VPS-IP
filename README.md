@@ -4,8 +4,6 @@
 
 ## 安装
 
-点击右侧复制按钮即可一键安装：
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wunskzb/VPS-IP/main/install.sh | bash
 
