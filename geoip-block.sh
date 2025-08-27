@@ -170,3 +170,146 @@ cmd_block() {
   }
   [[ "$mode" == "v4"  || "$mode" == "both" ]] && {
     log "开始屏蔽 $cc (IPv4)"
+    local f4; f4=$(download_cidrs_v4 "$cc")
+    create_set_if_needed_v4 "$cc"
+    fill_set_from_file_v4 "$cc" "$f4"
+    ensure_iptables_rule_v4 "$cc"
+    add_conf_v4 "$cc"
+    log "IPv4 已屏蔽 $cc（$(wc -l < "$f4") 段）"
+  }
+}
+
+cmd_unblock() {
+  local cc="$1" mode="$2"
+  [[ "$mode" == "v6"  || "$mode" == "both" ]] && {
+    log "取消屏蔽 $cc (IPv6)"
+    remove_iptables_rule_v6 "$cc"
+    ipset destroy "geo6_$(upper "$cc")" 2>/dev/null || true
+    del_conf_v6 "$cc"
+  }
+  [[ "$mode" == "v4"  || "$mode" == "both" ]] && {
+    log "取消屏蔽 $cc (IPv4)"
+    remove_iptables_rule_v4 "$cc"
+    ipset destroy "geo4_$(upper "$cc")" 2>/dev/null || true
+    del_conf_v4 "$cc"
+  }
+  log "已取消屏蔽 $cc [$mode]"
+}
+
+cmd_update() {
+  local cc="$1" mode="$2"
+  [[ "$mode" == "v6"  || "$mode" == "both" ]] && {
+    log "更新 $cc (IPv6)"
+    local f6; f6=$(download_cidrs_v6 "$cc")
+    create_set_if_needed_v6 "$cc"
+    fill_set_from_file_v6 "$cc" "$f6"
+    ensure_iptables_rule_v6 "$cc"
+    add_conf_v6 "$cc"
+  }
+  [[ "$mode" == "v4"  || "$mode" == "both" ]] && {
+    log "更新 $cc (IPv4)"
+    local f4; f4=$(download_cidrs_v4 "$cc")
+    create_set_if_needed_v4 "$cc"
+    fill_set_from_file_v4 "$cc" "$f4"
+    ensure_iptables_rule_v4 "$cc"
+    add_conf_v4 "$cc"
+  }
+  log "已更新 $cc [$mode]"
+}
+
+cmd_apply_all() {
+  ensure_ipset_mod
+  # IPv6
+  while read -r CC; do
+    [[ -z "${CC:-}" ]] && continue
+    local cc_lc; cc_lc=$(lower "$CC")
+    local f6="$DATA_DIR/${CC}_v6.cidr"
+    [[ -s "$f6" ]] || f6=$(download_cidrs_v6 "$cc_lc")
+    create_set_if_needed_v6 "$cc_lc"
+    fill_set_from_file_v6 "$cc_lc" "$f6"
+    ensure_iptables_rule_v6 "$cc_lc"
+  done < "$CONF_FILE_V6"
+  # IPv4
+  while read -r CC; do
+    [[ -z "${CC:-}" ]] && continue
+    local cc_lc; cc_lc=$(lower "$CC")
+    local f4="$DATA_DIR/${CC}_v4.cidr"
+    [[ -s "$f4" ]] || f4=$(download_cidrs_v4 "$cc_lc")
+    create_set_if_needed_v4 "$cc_lc"
+    fill_set_from_file_v4 "$cc_lc" "$f4"
+    ensure_iptables_rule_v4 "$cc_lc"
+  done < "$CONF_FILE_V4"
+  log "已恢复所有记录的国家屏蔽（IPv4/IPv6）。"
+}
+
+cmd_list() {
+  echo "IPv4 已记录屏蔽国家："; cat "$CONF_FILE_V4" || true; echo
+  echo "IPv6 已记录屏蔽国家："; cat "$CONF_FILE_V6" || true
+}
+
+cmd_status() {
+  echo "iptables (IPv4) 中的 geo4_* 规则："
+  iptables -S | grep -E 'match-set geo4_' || true
+  echo
+  echo "ip6tables (IPv6) 中的 geo6_* 规则："
+  ip6tables -S | grep -E 'match-set geo6_' || true
+  echo
+  echo "ipset 集合摘要："
+  ipset list | awk 'BEGIN{set=""; fam=""} /^Name: geo[46]_/ {set=$2} /^Family:/ {fam=$2} /^Number of entries/ {print set " (" fam "): " $4 " entries"}'
+}
+
+usage() {
+  cat <<'EOF'
+用法:
+  geoip-block block   <CC> [--v4|--v6|--both]   # 屏蔽国家(ISO2)，默认 --both
+  geoip-block unblock <CC> [--v4|--v6|--both]   # 取消屏蔽
+  geoip-block update  <CC> [--v4|--v6|--both]   # 更新该国家的 IP 段
+  geoip-block list
+  geoip-block status
+  geoip-block apply-all                          # 供 systemd 开机恢复
+
+环境变量(可选):
+  IP_SOURCE_V4=ipdeny|custom
+  CUSTOM_URL_V4='https://example.com/v4/{cc}-aggregated.zone'
+  IP_SOURCE_V6=ipdeny|custom
+  CUSTOM_URL_V6='https://example.com/v6/{cc}-aggregated.zone'
+EOF
+  exit 1
+}
+
+parse_mode() {
+  local mode="both"
+  case "${1:-}" in
+    --v4) mode="v4" ;;
+    --v6) mode="v6" ;;
+    --both|"") mode="both" ;;
+    *) echo "未知选项：$1" >&2; usage ;;
+  esac
+  echo "$mode"
+}
+
+main() {
+  need_root
+  prepare_dirs
+  install_deps
+
+  local cmd=${1:-}; shift || true
+  case "$cmd" in
+    block|unblock|update)
+      [[ $# -ge 1 ]] || usage
+      local cc="$1"; shift || true
+      local mode; mode=$(parse_mode "${1:-}")
+      case "$cmd" in
+        block)   cmd_block "$cc" "$mode"   ;;
+        unblock) cmd_unblock "$cc" "$mode" ;;
+        update)  cmd_update "$cc" "$mode"  ;;
+      esac
+      ;;
+    list)    cmd_list ;;
+    status)  cmd_status ;;
+    apply-all) cmd_apply_all ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"
